@@ -1,0 +1,56 @@
+name: Daily scrape
+
+on:
+  schedule:
+    # vsak dan ob 06:10 UTC (07:10 Ljubljana pozimi, 08:10 poleti)
+    - cron: "10 17 * * *"
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # da lahko commitamo db nazaj v repo
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Ensure DB exists
+        run: |
+          mkdir -p data
+          if [ ! -f data/prices.sqlite ]; then
+            echo "DB missing -> initializing new DB at data/prices.sqlite"
+            python app.py init-db --db data/prices.sqlite --schema schema.sql
+          fi
+
+      - name: Scrape all
+        run: |
+          python app.py scrape-all --db data/prices.sqlite --schema schema.sql
+        # Na GitHub runnerju ponavadi NE rabiš --insecure-ssl.
+        # Če bi slučajno failalo, lahko dodaš: --insecure-ssl
+
+      - name: Commit updated DB (if changed)
+        run: |
+          if git diff --quiet -- data/prices.sqlite; then
+            echo "No DB changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/prices.sqlite
+          git commit -m "Daily scrape: update prices db"
+          git push
