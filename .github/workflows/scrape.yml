@@ -3,7 +3,7 @@ name: Daily scrape
 on:
   schedule:
     # vsak dan ob 06:10 UTC (07:10 Ljubljana pozimi, 08:10 poleti)
-    - cron: "10 17 * * *"
+    - cron: "10 6 * * *"
   workflow_dispatch:
 
 jobs:
