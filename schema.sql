@@ -7,11 +7,13 @@ CREATE TABLE IF NOT EXISTS store (
 
 CREATE TABLE IF NOT EXISTS canonical_item (
   id    INTEGER PRIMARY KEY AUTOINCREMENT,
-  key   TEXT NOT NULL UNIQUE,
+  family_key   TEXT NOT NULL,
   label TEXT NOT NULL,
   size  REAL NOT NULL,
-  unit  TEXT NOT NULL
+  unit  TEXT NOT NULL,
+  UNIQUE (family_key, size, unit)
 );
+CREATE INDEX IF NOT EXISTS idx_canonical_family ON canonical_item(family_key);
 
 CREATE TABLE IF NOT EXISTS store_item (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -10,7 +10,10 @@ class StoreItemForScrape:
     url: str
     scraper: str
     store_name: str
-    canonical_key: str
+    family_key: str
+    canonical_label: str
+    canonical_size: float
+    canonical_unit: str
 
 
 class StoreItemRepo:
@@ -52,11 +55,14 @@ class StoreItemRepo:
               si.url,
               si.scraper,
               s.name AS store_name,
-              ci.key AS canonical_key
+              ci.family_key AS family_key,
+              ci.label AS canonical_label,
+              ci.size AS canonical_size,
+              ci.unit AS canonical_unit
             FROM store_item si
             JOIN store s ON s.id = si.store_id
             JOIN canonical_item ci ON ci.id = si.canonical_item_id
-            ORDER BY s.name, ci.key
+            ORDER BY s.name, ci.family_key, ci.unit, ci.size
             """
         ).fetchall()
 
@@ -66,7 +72,10 @@ class StoreItemRepo:
                 url=str(r["url"]),
                 scraper=str(r["scraper"]),
                 store_name=str(r["store_name"]),
-                canonical_key=str(r["canonical_key"]),
+                family_key=str(r["family_key"]),
+                canonical_label=str(r["canonical_label"]),
+                canonical_size=float(r["canonical_size"]),
+                canonical_unit=str(r["canonical_unit"]),
             )
             for r in rows
         ]
@@ -77,7 +86,13 @@ class StoreItemRepo:
             return None
         row = self.conn.execute(
             """
-            SELECT si.id, si.url, si.scraper, s.name AS store_name, ci.key AS canonical_key
+            SELECT
+              si.id, si.url, si.scraper,
+              s.name AS store_name,
+              ci.family_key AS family_key,
+              ci.label AS canonical_label,
+              ci.size AS canonical_size,
+              ci.unit AS canonical_unit
             FROM store_item si
             JOIN store s ON s.id = si.store_id
             JOIN canonical_item ci ON ci.id = si.canonical_item_id

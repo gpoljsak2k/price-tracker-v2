@@ -10,7 +10,10 @@ class PricePoint:
     observed_on: str          # 'YYYY-MM-DD'
     price_cents: int
     store_name: str
-    canonical_key: str
+    family_key: str
+    canonical_label: str
+    canonical_size: float
+    canonical_unit: str
     title_raw: Optional[str]
 
 
@@ -40,10 +43,10 @@ class ObservationRepo:
         )
         return cur.rowcount == 1
 
-    def history_by_canonical_key(self, canonical_key: str) -> list[PricePoint]:
-        canonical_key = canonical_key.strip()
-        if not canonical_key:
-            raise ValueError("canonical_key cannot be empty")
+    def history_by_family_key(self, family_key: str) -> list[PricePoint]:
+        family_key = family_key.strip()
+        if not family_key:
+            raise ValueError("family_key cannot be empty")
 
         rows = self.conn.execute(
             """
@@ -51,16 +54,19 @@ class ObservationRepo:
               po.observed_on,
               po.price_cents,
               s.name AS store_name,
-              ci.key AS canonical_key,
+              ci.family_key AS family_key,
+              ci.label AS canonical_label,
+              ci.size AS canonical_size,
+              ci.unit AS canonical_unit,
               po.title_raw
             FROM price_observation po
             JOIN store_item si ON si.id = po.store_item_id
             JOIN store s ON s.id = si.store_id
             JOIN canonical_item ci ON ci.id = si.canonical_item_id
-            WHERE ci.key = ?
-            ORDER BY po.observed_on ASC, s.name ASC
+            WHERE ci.family_key = ?
+            ORDER BY po.observed_on ASC, s.name ASC, ci.unit ASC, ci.size ASC
             """,
-            (canonical_key,),
+            (family_key,),
         ).fetchall()
 
         return [
@@ -68,51 +74,11 @@ class ObservationRepo:
                 observed_on=str(r["observed_on"]),
                 price_cents=int(r["price_cents"]),
                 store_name=str(r["store_name"]),
-                canonical_key=str(r["canonical_key"]),
+                family_key=str(r["family_key"]),
+                canonical_label=str(r["canonical_label"]),
+                canonical_size=float(r["canonical_size"]),
+                canonical_unit=str(r["canonical_unit"]),
                 title_raw=(str(r["title_raw"]) if r["title_raw"] is not None else None),
             )
             for r in rows
         ]
-
-    def latest_two_by_canonical_key(self, canonical_key: str) -> dict[str, list[tuple[str, int]]]:
-        rows = self.conn.execute(
-            """
-            SELECT
-              s.name AS store_name,
-              po.observed_on,
-              po.price_cents
-            FROM price_observation po
-            JOIN store_item si ON si.id = po.store_item_id
-            JOIN store s ON s.id = si.store_id
-            JOIN canonical_item ci ON ci.id = si.canonical_item_id
-            WHERE ci.key = ?
-            ORDER BY s.name ASC, po.observed_on DESC
-            """,
-            (canonical_key,),
-        ).fetchall()
-
-        out: dict[str, list[tuple[str, int]]] = {}
-        for r in rows:
-            store = str(r["store_name"])
-            out.setdefault(store, [])
-            if len(out[store]) < 2:
-                out[store].append((str(r["observed_on"]), int(r["price_cents"])))
-        return out
-
-    def trend(prev_cents: int, last_cents: int) -> tuple[str, int, float]:
-        delta = last_cents - prev_cents
-        if delta > 0:
-            arrow = "↑"
-        elif delta < 0:
-            arrow = "↓"
-        else:
-            arrow = "→"
-
-        pct = 0.0
-        if prev_cents > 0:
-            pct = delta / prev_cents * 100.0
-        return arrow, delta, pct
-
-    def fmt_delta(delta_cents: int) -> str:
-        sign = "+" if delta_cents > 0 else ""
-        return f"{sign}{delta_cents / 100:.2f} €"
