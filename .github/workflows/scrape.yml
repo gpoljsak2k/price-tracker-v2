@@ -42,18 +42,9 @@ jobs:
           echo "$cols"
           echo "$cols" | grep -q "family_key" || (echo "DB schema is old (missing family_key). Commit a fresh DB." && exit 1)
 
-      - name: Debug DB (schema + file)
-        run: |
-          echo "PWD=$(pwd)"
-          ls -la
-          ls -la data || true
-          file data/prices.sqlite || true
-          sqlite3 data/prices.sqlite ".schema canonical_item" || true
-          sqlite3 data/prices.sqlite "PRAGMA table_info(canonical_item);" || true
-
       - name: Scrape all
         run: |
-          python app.py scrape-all --db data/prices.sqlite --schema schema.sql
+          python app.py scrape-all --db data/prices.sqlite --schema schema.sql --fail-on-error
         # Na GitHub runnerju ponavadi NE rabiš --insecure-ssl.
         # Če bi slučajno failalo, lahko dodaš: --insecure-ssl
 
@@ -66,6 +57,9 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git pull --rebase
+          
           git add data/prices.sqlite
           git commit -m "Daily scrape: update prices db"
           git push

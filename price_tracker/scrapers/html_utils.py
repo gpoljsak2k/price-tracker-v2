@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import ssl
+import certifi
 import urllib.request
 
 DEFAULT_HEADERS = {
@@ -9,21 +10,18 @@ DEFAULT_HEADERS = {
     "Accept-Language": "sl-SI,sl;q=0.9,en;q=0.8",
 }
 
-
 def fetch_html(url: str, timeout_s: int = 20, *, verify_ssl: bool = True) -> str:
     req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
 
-    context = None
-    if not verify_ssl:
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
+    if verify_ssl:
+        context = ssl.create_default_context(cafile=certifi.where())
+    else:
+        context = ssl._create_unverified_context()
 
     with urllib.request.urlopen(req, timeout=timeout_s, context=context) as resp:
         raw = resp.read()
 
     return raw.decode("utf-8", errors="replace")
-
 
 def extract_title(html: str) -> str:
     # 1) og:title (atributi niso vedno v istem vrstnem redu)

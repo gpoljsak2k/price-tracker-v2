@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-from typing import Tuple
+import time
 
 from price_tracker.db import connect, init_db, transaction
 from price_tracker.repos import StoreRepo, CanonicalItemRepo, StoreItemRepo, ObservationRepo
 
-
 import os
 import subprocess
+import json
+from collections import defaultdict
+from typing import Any
+
 # ---------- Scraper dispatch ----------
 
 def scrape_url(scraper: str, url: str, *, verify_ssl: bool = True):
@@ -114,6 +117,9 @@ def cmd_scrape_all(args):
             print(f"[FAIL]   {si.store_name} {tag} ({si.scraper}) {si.url} :: {e}")
 
     print(f"Done. inserted={inserted} skipped={skipped} failed={failed}")
+
+    if failed > 0 and args.fail_on_error:
+        raise SystemExit(2)
 
 def compute_normalized_unit_price(price_cents: int, size: float, unit: str):
     if size <= 0:
@@ -367,6 +373,403 @@ def cmd_sync(args):
         else:
             print("DB has no observations yet.")
 
+def cmd_list_tracked(args):
+    conn = connect(args.db)
+    init_db(conn, args.schema)
+
+    rows = conn.execute(
+        """
+        SELECT
+          s.name AS store_name,
+          ci.family_key AS family_key,
+          ci.size AS size,
+          ci.unit AS unit,
+          ci.label AS label,
+          si.scraper AS scraper,
+          si.url AS url,
+          po.observed_on AS observed_on,
+          po.price_cents AS price_cents
+        FROM store_item si
+        JOIN store s ON s.id = si.store_id
+        JOIN canonical_item ci ON ci.id = si.canonical_item_id
+        LEFT JOIN price_observation po
+          ON po.store_item_id = si.id
+         AND po.observed_on = (
+            SELECT MAX(observed_on)
+            FROM price_observation
+            WHERE store_item_id = si.id
+         )
+        ORDER BY s.name, ci.family_key, ci.unit, ci.size
+        """
+    ).fetchall()
+
+    if not rows:
+        print("No tracked store_items.")
+        return
+
+    print("Tracked items")
+    print("-" * 120)
+
+    for r in rows:
+        store = r["store_name"]
+        family = r["family_key"]
+        size = float(r["size"])
+        unit = r["unit"]
+        label = r["label"]
+        scraper = r["scraper"]
+        url = r["url"]
+        observed_on = r["observed_on"]
+        price_cents = r["price_cents"]
+
+        line = f"{store:<10} {family:<15} {size:g}{unit:<3}  {label:<35}  "
+
+        if price_cents is None:
+            line += "(no observations)"
+        else:
+            eur = int(price_cents) / 100.0
+            line += f"{eur:>7.2f} €  [{observed_on}]"
+
+            if args.normalized:
+                norm = compute_normalized_unit_price(int(price_cents), size, unit)
+                if norm:
+                    nv, nu = norm
+                    line += f"  ({nv:.2f} €/{nu})"
+
+        print(line)
+
+        if args.show_url:
+            print(f"    scraper={scraper}  url={url}")
+
+    print("-" * 120)
+
+def cmd_doctor(args):
+    conn = connect(args.db)
+    init_db(conn, args.schema)
+
+    repo = StoreItemRepo(conn)
+    items = repo.list_for_scrape()
+
+    if not items:
+        print("No tracked store_items. Use track-url first.")
+        return
+
+    # optional filters
+    if args.store:
+        want = args.store.strip().lower()
+        items = [x for x in items if x.store_name.lower() == want]
+
+    if args.key:
+        want = args.key.strip().lower()
+        items = [x for x in items if x.family_key.lower() == want]
+
+    if args.limit is not None:
+        items = items[: int(args.limit)]
+
+    if not items:
+        print("No matching tracked store_items for given filters.")
+        return
+
+    ok = fail = 0
+    print(f"Doctor check (items={len(items)})")
+    print("-" * 120)
+
+    for si in items:
+        label = f"{si.family_key} {si.canonical_size:g}{si.canonical_unit} ({si.store_name})"
+        t0 = time.perf_counter()
+        try:
+            price_cents, title_raw = scrape_url(
+                si.scraper,
+                si.url,
+                verify_ssl=not args.insecure_ssl,
+            )
+            ms = int((time.perf_counter() - t0) * 1000)
+            eur = int(price_cents) / 100.0
+
+            norm_str = ""
+            if args.normalized:
+                norm = compute_normalized_unit_price(int(price_cents), si.canonical_size, si.canonical_unit)
+                if norm:
+                    nv, nu = norm
+                    norm_str = f"  ({nv:.2f} €/{nu})"
+
+            print(f"[OK]   {label:<45}  {eur:>7.2f} €{norm_str}  {ms}ms")
+            if args.show_title and title_raw:
+                print(f"       title={title_raw.strip()}")
+            if args.show_url:
+                print(f"       scraper={si.scraper} url={si.url}")
+            ok += 1
+
+        except Exception as e:
+            ms = int((time.perf_counter() - t0) * 1000)
+            print(f"[FAIL] {label:<45}  {ms}ms  :: {e}")
+            if args.show_url:
+                print(f"       scraper={si.scraper} url={si.url}")
+            fail += 1
+
+    print("-" * 120)
+    print(f"Summary: ok={ok} failed={fail}")
+
+    # make it CI-friendly if you want:
+    if fail > 0 and args.fail_on_error:
+        raise SystemExit(2)
+
+def cmd_compare_list(args):
+    conn = connect(args.db)
+    init_db(conn, args.schema)
+
+    # load list
+    with open(args.list, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    items = payload.get("items", [])
+    if not isinstance(items, list) or not items:
+        print("Invalid shopping list: expected {\"items\": [...]} with at least 1 item")
+        return
+
+    want = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        key = str(it.get("key", "")).strip()
+        qty = it.get("qty", 1)
+        try:
+            qty = int(qty)
+        except Exception:
+            qty = 1
+        if not key or qty <= 0:
+            continue
+        want.append((key, qty))
+
+    if not want:
+        print("Shopping list has no valid items.")
+        return
+
+    # get list of stores
+    stores = conn.execute("SELECT id, name FROM store ORDER BY name").fetchall()
+    if not stores:
+        print("No stores in DB yet.")
+        return
+
+    # Prepare output accumulators per store
+    per_store_total_cents = {int(s["id"]): 0 for s in stores}
+    per_store_missing = {int(s["id"]): [] for s in stores}
+    per_store_lines = {int(s["id"]): [] for s in stores}
+
+    # For each requested family_key, pick best option per store
+    for family_key, qty in want:
+        # latest observed options per store for this family_key (across packs)
+        rows = conn.execute(
+            """
+            SELECT
+              s.id AS store_id,
+              s.name AS store_name,
+              ci.family_key AS family_key,
+              ci.label AS label,
+              ci.size AS size,
+              ci.unit AS unit,
+              si.url AS url,
+              po.observed_on AS observed_on,
+              po.price_cents AS price_cents
+            FROM store_item si
+            JOIN store s ON s.id = si.store_id
+            JOIN canonical_item ci ON ci.id = si.canonical_item_id
+            LEFT JOIN price_observation po
+              ON po.store_item_id = si.id
+             AND po.observed_on = (
+                  SELECT MAX(observed_on)
+                  FROM price_observation
+                  WHERE store_item_id = si.id
+             )
+            WHERE ci.family_key = ?
+            """,
+            (family_key,),
+        ).fetchall()
+
+        # group by store_id and pick cheapest by normalized €/unit
+        options_by_store = defaultdict(list)
+        for r in rows:
+            store_id = int(r["store_id"])
+            if r["price_cents"] is None:
+                continue
+            price_cents = int(r["price_cents"])
+            size = float(r["size"])
+            unit = str(r["unit"])
+            norm = compute_normalized_unit_price(price_cents, size, unit)
+            if not norm:
+                # if unsupported unit, fallback to pack price (still works, but less meaningful)
+                norm_val, norm_unit = price_cents / 100.0, unit
+            else:
+                norm_val, norm_unit = norm
+
+            options_by_store[store_id].append(
+                {
+                    "store_name": str(r["store_name"]),
+                    "family_key": str(r["family_key"]),
+                    "label": str(r["label"]),
+                    "size": size,
+                    "unit": unit,
+                    "url": str(r["url"]),
+                    "observed_on": str(r["observed_on"]),
+                    "price_cents": price_cents,
+                    "norm_val": float(norm_val),
+                    "norm_unit": norm_unit,
+                }
+            )
+
+        for s in stores:
+            sid = int(s["id"])
+            sname = str(s["name"])
+
+            opts = options_by_store.get(sid, [])
+            if not opts:
+                per_store_missing[sid].append(f"{family_key} x{qty}")
+                continue
+
+            best = min(opts, key=lambda x: x["norm_val"])
+            line_total = best["price_cents"] * qty
+            per_store_total_cents[sid] += line_total
+
+            price_eur = best["price_cents"] / 100.0
+            line_total_eur = line_total / 100.0
+            per_unit = f"{best['norm_val']:.2f} €/{best['norm_unit']}"
+
+            per_store_lines[sid].append(
+                f"- {family_key:<12} x{qty:<2}  "
+                f"{best['size']:g}{best['unit']:<3} {price_eur:>7.2f} €  "
+                f"({per_unit})  -> {line_total_eur:>7.2f} €   [{best['observed_on']}]  {best['label']}"
+                + (f"\n    {best['url']}" if args.show_url else "")
+            )
+
+    # Print results
+    print(f"Compare list: {args.list}")
+    print("=" * 120)
+
+    # sort stores by total (missing-heavy stores last)
+    def sort_key(sid: int):
+        missing_count = len(per_store_missing[sid])
+        return (missing_count, per_store_total_cents[sid])
+
+    for s in sorted(stores, key=lambda r: sort_key(int(r["id"]))):
+        sid = int(s["id"])
+        sname = str(s["name"])
+        total_eur = per_store_total_cents[sid] / 100.0
+        missing = per_store_missing[sid]
+
+        print(f"{sname}  total={total_eur:.2f} €   missing={len(missing)}")
+        print("-" * 120)
+
+        lines = per_store_lines[sid]
+        if lines:
+            for ln in lines:
+                print(ln)
+        else:
+            print("(no matched items)")
+
+        if missing:
+            print("\nMissing:")
+            for m in missing:
+                print(f"  - {m}")
+        print("=" * 120)
+
+def _load_shopping_list(path: str) -> dict[str, Any]:
+    path = path.strip()
+    if not path:
+        raise ValueError("list path is empty")
+
+    if not os.path.exists(path):
+        return {"items": []}
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if not isinstance(data, dict):
+        raise ValueError("shopping list must be a JSON object")
+
+    items = data.get("items")
+    if items is None:
+        data["items"] = []
+    elif not isinstance(items, list):
+        raise ValueError('shopping list must contain "items": [...]')
+
+    # normalize entries
+    norm_items = []
+    for it in data["items"]:
+        if not isinstance(it, dict):
+            continue
+        key = str(it.get("key", "")).strip()
+        if not key:
+            continue
+        qty = it.get("qty", 1)
+        try:
+            qty = int(qty)
+        except Exception:
+            qty = 1
+        if qty <= 0:
+            continue
+        norm_items.append({"key": key, "qty": qty})
+
+    data["items"] = norm_items
+    return data
+
+def _save_shopping_list(path: str, data: dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+def cmd_list_show(args):
+    data = _load_shopping_list(args.list)
+    items = data.get("items", [])
+    print(f"Shopping list: {args.list}")
+    print("-" * 60)
+    if not items:
+        print("(empty)")
+        return
+    for it in items:
+        print(f"- {it['key']:<20} qty={it['qty']}")
+
+def cmd_list_add(args):
+    key = args.key.strip()
+    if not key:
+        raise SystemExit("Error: --key cannot be empty")
+
+    qty = int(args.qty)
+    if qty <= 0:
+        raise SystemExit("Error: --qty must be > 0")
+
+    data = _load_shopping_list(args.list)
+    items = data["items"]
+
+    for it in items:
+        if it["key"] == key:
+            it["qty"] = qty
+            _save_shopping_list(args.list, data)
+            print(f"OK: updated {key} qty={qty} in {args.list}")
+            return
+
+    items.append({"key": key, "qty": qty})
+    items.sort(key=lambda x: x["key"])
+    _save_shopping_list(args.list, data)
+    print(f"OK: added {key} qty={qty} to {args.list}")
+
+def cmd_list_rm(args):
+    key = args.key.strip()
+    if not key:
+        raise SystemExit("Error: --key cannot be empty")
+
+    data = _load_shopping_list(args.list)
+    items = data["items"]
+    before = len(items)
+    items = [it for it in items if it["key"] != key]
+    data["items"] = items
+
+    if len(items) == before:
+        print(f"Nothing to remove: {key} not found in {args.list}")
+        return
+
+    _save_shopping_list(args.list, data)
+    print(f"OK: removed {key} from {args.list}")
+
 # ---------- argparse wiring ----------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -376,6 +779,7 @@ def build_parser() -> argparse.ArgumentParser:
     def add_db_args(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--db", default="data/prices.sqlite", help="Path to sqlite db file")
         sp.add_argument("--schema", default="schema.sql", help="Path to schema.sql")
+
 
     # init-db
     p_init = sub.add_parser("init-db", help="Initialize database schema")
@@ -400,6 +804,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_scrape.add_argument("--date", default=None, help="Override observed_on (YYYY-MM-DD). Default: today")
     p_scrape.add_argument("--insecure-ssl", action="store_true", help="DEV ONLY: disable SSL certificate verification")
     p_scrape.set_defaults(func=cmd_scrape_all)
+    p_scrape.add_argument("--fail-on-error", action="store_true", help="Exit with non-zero code if any scrape fails (CI-friendly)",)
 
     # history
     p_hist = sub.add_parser("history", help="Show price history for a canonical item key")
@@ -420,10 +825,56 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch.add_argument("--show-title", action="store_true", help="Print raw scraped title for the cheapest entry")
     p_ch.set_defaults(func=cmd_cheapest)
 
+    # sync
     p_sync = sub.add_parser("sync", help="Git pull (fast-forward) and optionally show DB latest date")
     add_db_args(p_sync)
     p_sync.add_argument("--show-db", action="store_true", help="Show DB latest observed_on after pull")
     p_sync.set_defaults(func=cmd_sync)
+
+    # list-tracked
+    p_list = sub.add_parser("list-tracked", help="List all tracked store items")
+    add_db_args(p_list)
+    p_list.add_argument("--show-url", action="store_true", help="Show URL and scraper")
+    p_list.add_argument("--normalized", action="store_true", help="Show normalized €/unit")
+    p_list.set_defaults(func=cmd_list_tracked)
+
+    # healthcheck for scrapers
+    p_doc = sub.add_parser("doctor", help="Healthcheck: try scraping tracked URLs without writing to DB")
+    add_db_args(p_doc)
+    p_doc.add_argument("--store", default=None, help="Filter by store name (e.g. Mercator)")
+    p_doc.add_argument("--key", default=None, help="Filter by family key (e.g. olive_oil)")
+    p_doc.add_argument("--limit", type=int, default=None, help="Limit number of checks")
+    p_doc.add_argument("--insecure-ssl", action="store_true", help="DEV ONLY: disable SSL verification")
+    p_doc.add_argument("--show-url", action="store_true", help="Print URL + scraper")
+    p_doc.add_argument("--show-title", action="store_true", help="Print raw scraped title")
+    p_doc.add_argument("--normalized", action="store_true", help="Show normalized €/unit")
+    p_doc.add_argument("--fail-on-error", action="store_true", help="Exit with non-zero code if any FAIL")
+    p_doc.set_defaults(func=cmd_doctor)
+
+    # compare-list
+    p_cmp = sub.add_parser("compare-list", help="Compare a shopping list across stores")
+    add_db_args(p_cmp)
+    p_cmp.add_argument("--list", required=True, help="Path to shopping_list.json")
+    p_cmp.add_argument("--show-url", action="store_true", help="Show selected item URL per store")
+    p_cmp.set_defaults(func=cmd_compare_list)
+
+    # list-show
+    p_ls = sub.add_parser("list-show", help="Show shopping list JSON")
+    p_ls.add_argument("--list", required=True, help="Path to shopping_list.json")
+    p_ls.set_defaults(func=cmd_list_show)
+
+    # list-add
+    p_la = sub.add_parser("list-add", help="Add/update an item in shopping list JSON")
+    p_la.add_argument("--list", required=True, help="Path to shopping_list.json")
+    p_la.add_argument("--key", required=True, help="Family key, e.g. milk, eggs, olive_oil")
+    p_la.add_argument("--qty", type=int, default=1, help="Quantity (number of packs)")
+    p_la.set_defaults(func=cmd_list_add)
+
+    # list-rm
+    p_lr = sub.add_parser("list-rm", help="Remove an item from shopping list JSON")
+    p_lr.add_argument("--list", required=True, help="Path to shopping_list.json")
+    p_lr.add_argument("--key", required=True, help="Family key to remove")
+    p_lr.set_defaults(func=cmd_list_rm)
 
     return p
 

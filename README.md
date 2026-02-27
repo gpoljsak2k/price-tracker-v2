@@ -1,36 +1,56 @@
-# price-tracker-v2
+# Price Tracker V2
 
-A modular CLI price tracking system built in Python.
+CLI price tracking tool for Slovenian grocery stores (Hofer, Mercator, Lidl, Spar).
 
-Tracks grocery prices across multiple stores, normalizes them to unit price, supports trend analysis and automated daily scraping.
+Tracks product prices daily, normalizes by unit (€/l, €/kg, €/pcs), 
+and compares shopping lists across stores.
 
 https://github.com/gpoljsak2k/price-tracker-v2/actions/workflows/ci.yml
 
 ## Features
 
-- SQLite-backed canonical data model (Stores / Canonical Items / Store Items / Prices)
-- Unit price normalization (€/kg, €/l, €/pcs)
-- history – historical price tracking
-    --normalized – normalized price display
-    --trend – last-two-observation trend (↑ ↓ →, absolute + %)
-- Multi-store support:
-    - Mercator 
-    - Hofer
-    - Lidl
-    - Spar (via backend API)
-- Idempotent daily scraping
+- Track product URLs from multiple stores
+- Canonical "family_key" model (e.g. olive_oil, milk)
+- Automatic daily scraping via GitHub Actions
+- Price history with trend indicator
+  - --normalized – normalized price display
+  - --trend – last-two-observation trend (↑ ↓ →, absolute + %)
+- Unit-normalized comparison (€/l, €/kg, €/pcs)
+- Shopping list comparison across stores
+- Healthcheck (`doctor`) for scraper stability
 - Automated test suite (pytest)
-- CI + daily scheduled scraping via GitHub Actions
-- sync command
 
-## CLI overview
-### Initialize database
+## Architecture
+
+- Python 3.10
+- SQLite
+- argparse CLI
+- Daily scraping via GitHub Actions
+- Canonical family-based product model
+
+### Core Tables
+
+- store
+- canonical_item (family_key + size + unit)
+- store_item (URL mapping)
+- price_observation (1 per day per item)
+
+## Setup
+
+```bash
+git clone https://github.com/...
+cd price-tracker-v2
+
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+## Initialize database
 
 ```bash
 python app.py init-db --db data/prices.sqlite --schema schema.sql
 ```
-
-### Track a product URL
+## Track a product
 
 ```bash
 python app.py track-url \
@@ -38,93 +58,32 @@ python app.py track-url \
   --schema schema.sql \
   --store Mercator \
   --scraper mercator \
-  --url "PRODUCT_URL" \
-  --key olive_oil_750ml \
-  --label "Oljčno olje 750 ml" \
-  --size 0.75 --unit l
+  --url "https://..." \
+  --key olive_oil \
+  --label "Monini Classico" \
+  --size 0.75 \
+  --unit l
 ```
+- `--key` = family key (olive_oil, milk, eggs)
+- `--size` + `--unit` = pack size
 
-### Scrape all tracked products
+## Scrape prices
+
+Run manually:
 
 ```bash
-python app.py scrape-all \
-  --db data/prices.sqlite \
-  --schema schema.sql
+python app.py scrape-all --db data/prices.sqlite --schema schema.sql
+
+# CI friendly
+python app.py scrape-all --db data/prices.sqlite --schema schema.sql --fail-on-error
 ```
-
-### Show history
-
-```bash
-python app.py history \
-  --db data/prices.sqlite \
-  --schema schema.sql \
-  --key olive_oil_750ml
-```
-With normalized unit price:
-```bash
---normalized
-```
-With trend:
-```bash
---trend
-```
-Example output:
-```bash
-Trend for olive_oil_750ml
-------------------------------------------------------------------------------------------
-Mercator   ↓ 11.99 €  -1.00 €  (-7.7%)  [2026-02-25→2026-02-26]
-Lidl       →  5.29 €   +0.00 €  (+0.0%)
-```
-
-## Arhutecture
-```bash
-price_tracker/
-  repos/       -> database access layer (no business logic)
-  scrapers/    -> store-specific scraping logic
-  services/    -> domain logic (future extensions)
-  app.py       -> CLI / controller layer
-  tests/       -> pytest suite
-```
-
-### Design Principles
-
-- Canonical-based comparison (brand-independent)
-
-- One daily observation per store item (idempotent)
-
-- Store-specific scraping isolated per module
-
-- Minimal, explicit SQLite schema
-
-- Testable parsing layer (no network in tests)
-
-## Database Model (V2)
-
-### Core tables:
-
-- store
-- canonical_item
-- store_item
-- price_observation
-
-Canonical item represents product concept.
-Store item maps a store-specific URL to canonical item.
-Price observation stores daily price snapshots.
-
 ## Automation
 
-Includes:
+Daily scraping runs via GitHub Actions at 06:10 UTC.
 
--CI workflow (tests on push)
-
--Scheduled daily scraping via GitHub Actions
-
--Automatic commit of updated SQLite database
-
-### Database location:
-```bash
-data/prices.sqlite
-```
+The workflow:
+- Runs `scrape-all`
+- Commits updated `data/prices.sqlite` if changed
 
 ## sync Command
 
@@ -145,6 +104,39 @@ python app.py sync --db data/prices.sqlite --schema schema.sql
 python app.py sync --db data/prices.sqlite --schema schema.sql --show-db
 ```
 
+## Scraper healthcheck
+
+```bash
+python app.py doctor --db data/prices.sqlite --schema schema.sql --fail-on-error
+```
+
+## List tracked items
+
+```bash
+python app.py list-tracked --db data/prices.sqlite --schema schema.sql --normalized
+```
+## Shopping list
+
+Create/edit list:
+
+```bash
+python app.py list-add --list shopping_list.json --key olive_oil --qty 1
+python app.py list-add --list shopping_list.json --key milk --qty 2
+```
+### Compare list
+```bash
+python app.py compare-list \
+  --db data/prices.sqlite \
+  --schema schema.sql \
+  --list shopping_list.json
+```
+## Design Decisions
+
+- Family-based canonical model instead of strict SKU matching
+- One price observation per day per store item (idempotent scraping)
+- Normalized unit price comparison for cross-pack evaluation
+- SQLite committed to repo for reproducible history
+
 ## Tech Stack
 
 - Python 3.10
@@ -152,3 +144,17 @@ python app.py sync --db data/prices.sqlite --schema schema.sql --show-db
 - argparse
 - pytest
 - GitHub Actions
+
+## Limitations
+
+- Scrapers may break if store HTML changes
+- SQLite DB grows over time
+- No web UI (CLI only) (for now)
+
+## Roadmap
+
+- Web UI (Streamlit or FastAPI)
+- Price drop alerts
+- Historical charts
+- Export to CSV
+- DB pruning strategy
