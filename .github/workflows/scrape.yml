@@ -36,6 +36,21 @@ jobs:
             python app.py init-db --db data/prices.sqlite --schema schema.sql
           fi
 
+      - name: Verify DB schema (family_key)
+        run: |
+          cols=$(sqlite3 data/prices.sqlite "PRAGMA table_info(canonical_item);")
+          echo "$cols"
+          echo "$cols" | grep -q "family_key" || (echo "DB schema is old (missing family_key). Commit a fresh DB." && exit 1)
+
+      - name: Debug DB (schema + file)
+        run: |
+          echo "PWD=$(pwd)"
+          ls -la
+          ls -la data || true
+          file data/prices.sqlite || true
+          sqlite3 data/prices.sqlite ".schema canonical_item" || true
+          sqlite3 data/prices.sqlite "PRAGMA table_info(canonical_item);" || true
+
       - name: Scrape all
         run: |
           python app.py scrape-all --db data/prices.sqlite --schema schema.sql
