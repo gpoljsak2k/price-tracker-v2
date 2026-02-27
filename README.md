@@ -21,6 +21,7 @@ https://github.com/gpoljsak2k/price-tracker-v2/actions/workflows/ci.yml
 - Idempotent daily scraping
 - Automated test suite (pytest)
 - CI + daily scheduled scraping via GitHub Actions
+- sync command
 
 ## CLI overview
 ### Initialize database
@@ -123,6 +124,25 @@ Includes:
 ### Database location:
 ```bash
 data/prices.sqlite
+```
+
+## sync Command
+
+The sync command keeps your local database up to date with the latest prices collected by GitHub Actions.
+
+- What sync does:
+    - Runs a fast-forward git pull
+    - Optionally shows the latest observed_on date in the database
+
+- This ensures your local data/prices.sqlite contains the newest price observations.
+
+### Usage
+```bash
+python app.py sync --db data/prices.sqlite --schema schema.sql
+```
+#### Show latest available data after syncing:
+```bash
+python app.py sync --db data/prices.sqlite --schema schema.sql --show-db
 ```
 
 ## Tech Stack

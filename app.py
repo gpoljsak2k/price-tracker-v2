@@ -9,6 +9,7 @@ from price_tracker.repos import StoreRepo, CanonicalItemRepo, StoreItemRepo, Obs
 
 
 import os
+import subprocess
 # ---------- Scraper dispatch ----------
 
 def scrape_url(scraper: str, url: str, *, verify_ssl: bool = True):
@@ -332,6 +333,40 @@ def cmd_cheapest(args):
         print("-" * 110)
         print("Missing (tracked but no observations yet):", ", ".join(sorted(set(missing))))
 
+def cmd_sync(args):
+    # 1) git pull
+    if not os.path.isdir(".git"):
+        print("Not a git repo (missing .git). Sync works only inside a git repository.")
+        return
+
+    pull_cmd = ["git", "pull", "--ff-only"]
+    print("$ " + " ".join(pull_cmd))
+    res = subprocess.run(pull_cmd, text=True, capture_output=True)
+
+    if res.returncode != 0:
+        # show useful error
+        if res.stdout.strip():
+            print(res.stdout.strip())
+        if res.stderr.strip():
+            print(res.stderr.strip())
+        raise SystemExit(res.returncode)
+
+    out = (res.stdout or "").strip()
+    print(out if out else "Already up to date.")
+
+    # 2) optional: show DB status (max observed_on)
+    if args.show_db:
+        conn = connect(args.db)
+        init_db(conn, args.schema)
+
+        row = conn.execute("SELECT MAX(observed_on) AS max_day FROM price_observation").fetchone()
+        max_day = row["max_day"] if row and row["max_day"] is not None else None
+
+        if max_day:
+            print(f"DB latest observed_on: {max_day}")
+        else:
+            print("DB has no observations yet.")
+
 # ---------- argparse wiring ----------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -384,6 +419,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ch.add_argument("--show-url", action="store_true", help="Print URL for the cheapest entry")
     p_ch.add_argument("--show-title", action="store_true", help="Print raw scraped title for the cheapest entry")
     p_ch.set_defaults(func=cmd_cheapest)
+
+    p_sync = sub.add_parser("sync", help="Git pull (fast-forward) and optionally show DB latest date")
+    add_db_args(p_sync)
+    p_sync.add_argument("--show-db", action="store_true", help="Show DB latest observed_on after pull")
+    p_sync.set_defaults(func=cmd_sync)
 
     return p
 
