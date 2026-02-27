@@ -2,26 +2,39 @@ from __future__ import annotations
 
 import re
 import ssl
-import certifi
-import urllib.request
+from urllib.request import Request, urlopen
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (price-tracker-v2; educational project)",
     "Accept-Language": "sl-SI,sl;q=0.9,en;q=0.8",
 }
 
-def fetch_html(url: str, timeout_s: int = 20, *, verify_ssl: bool = True) -> str:
-    req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
 
-    if verify_ssl:
-        context = ssl.create_default_context(cafile=certifi.where())
+def fetch_html(url: str, timeout_s: int = 20, verify_ssl: bool = True) -> str:
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (price-tracker; educational project)",
+            "Accept-Language": "sl,en;q=0.8",
+        },
+    )
+
+    ctx = None
+    if not verify_ssl:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     else:
-        context = ssl._create_unverified_context()
+        # try to use certifi if installed, otherwise fallback to system CA bundle
+        try:
+            import certifi  # type: ignore
 
-    with urllib.request.urlopen(req, timeout=timeout_s, context=context) as resp:
-        raw = resp.read()
+            ctx = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            ctx = ssl.create_default_context()
 
-    return raw.decode("utf-8", errors="replace")
+    with urlopen(req, timeout=timeout_s, context=ctx) as resp:
+        return resp.read().decode("utf-8", errors="replace")
 
 def extract_title(html: str) -> str:
     # 1) og:title (atributi niso vedno v istem vrstnem redu)
