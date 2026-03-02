@@ -55,7 +55,7 @@ class ObservationRepo:
               po.price_cents,
               s.name AS store_name,
               ci.family_key AS family_key,
-              ci.label AS canonical_label,
+              COALESCE(si.label_override, ci.label) AS canonical_label,
               ci.size AS canonical_size,
               ci.unit AS canonical_unit,
               po.title_raw

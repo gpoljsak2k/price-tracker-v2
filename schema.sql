@@ -29,19 +29,15 @@ CREATE INDEX IF NOT EXISTS idx_canonical_family
 -- STORE ITEM (mapping URL -> canonical pack)
 -- =========================
 CREATE TABLE IF NOT EXISTS store_item (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT,
-  store_id          INTEGER NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  store_id INTEGER NOT NULL,
   canonical_item_id INTEGER NOT NULL,
-  url               TEXT NOT NULL,
-  scraper           TEXT NOT NULL,
-
-  FOREIGN KEY (store_id)
-    REFERENCES store(id)
-    ON DELETE CASCADE,
-
-  FOREIGN KEY (canonical_item_id)
-    REFERENCES canonical_item(id)
-    ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  scraper TEXT NOT NULL,
+  label_override TEXT,  -- NOVO
+  UNIQUE(store_id, canonical_item_id),
+  FOREIGN KEY(store_id) REFERENCES store(id),
+  FOREIGN KEY(canonical_item_id) REFERENCES canonical_item(id) ON DELETE CASCADE,
 
   UNIQUE (store_id, canonical_item_id),
   UNIQUE (url)

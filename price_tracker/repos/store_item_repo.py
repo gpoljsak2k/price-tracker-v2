@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -14,13 +15,21 @@ class StoreItemForScrape:
     canonical_label: str
     canonical_size: float
     canonical_unit: str
+    label_override: Optional[str]
 
 
 class StoreItemRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
-    def upsert_mapping(self, store_id: int, canonical_item_id: int, url: str, scraper: str) -> int:
+    def upsert_mapping(
+        self,
+        store_id: int,
+        canonical_item_id: int,
+        url: str,
+        scraper: str,
+        label_override: str | None = None,
+    ) -> int:
         url = url.strip()
         scraper = scraper.strip().lower()
 
@@ -29,16 +38,23 @@ class StoreItemRepo:
         if not scraper:
             raise ValueError("scraper cannot be empty")
 
+        if label_override is not None:
+            label_override = label_override.strip()
+            if label_override == "":
+                label_override = None  # normalize empty -> NULL
+
         self.conn.execute(
             """
-            INSERT INTO store_item(store_id, canonical_item_id, url, scraper)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO store_item(store_id, canonical_item_id, url, scraper, label_override)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(store_id, canonical_item_id) DO UPDATE SET
               url=excluded.url,
-              scraper=excluded.scraper
+              scraper=excluded.scraper,
+              label_override=excluded.label_override
             """,
-            (int(store_id), int(canonical_item_id), url, scraper),
+            (int(store_id), int(canonical_item_id), url, scraper, label_override),
         )
+
         row = self.conn.execute(
             "SELECT id FROM store_item WHERE store_id=? AND canonical_item_id=?",
             (int(store_id), int(canonical_item_id)),
@@ -54,6 +70,7 @@ class StoreItemRepo:
               si.id AS store_item_id,
               si.url,
               si.scraper,
+              si.label_override,
               s.name AS store_name,
               ci.family_key AS family_key,
               ci.label AS canonical_label,
@@ -76,6 +93,7 @@ class StoreItemRepo:
                 canonical_label=str(r["canonical_label"]),
                 canonical_size=float(r["canonical_size"]),
                 canonical_unit=str(r["canonical_unit"]),
+                label_override=(str(r["label_override"]) if r["label_override"] is not None else None),
             )
             for r in rows
         ]
@@ -84,10 +102,14 @@ class StoreItemRepo:
         url = url.strip()
         if not url:
             return None
+
         row = self.conn.execute(
             """
             SELECT
-              si.id, si.url, si.scraper,
+              si.id,
+              si.url,
+              si.scraper,
+              si.label_override,
               s.name AS store_name,
               ci.family_key AS family_key,
               ci.label AS canonical_label,
@@ -100,4 +122,5 @@ class StoreItemRepo:
             """,
             (url,),
         ).fetchone()
+
         return dict(row) if row else None

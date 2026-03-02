@@ -13,6 +13,8 @@ import json
 from collections import defaultdict
 from typing import Any
 
+from price_tracker.utils import compute_normalized_unit_price
+
 # ---------- Scraper dispatch ----------
 
 def scrape_url(scraper: str, url: str, *, verify_ssl: bool = True):
@@ -64,11 +66,14 @@ def cmd_track_url(args):
             canonical_item_id=canonical_id,
             url=args.url,
             scraper=args.scraper,
+            label_override=args.store_label,
         )
 
+    pack = f"{float(args.size):g}{args.unit}"
+    extra = f" store_label={args.store_label!r}" if args.store_label else ""
     print(
         f"OK: tracked url for store_item_id={store_item_id} "
-        f"store={args.store} family={args.key} size={args.size}{args.unit}"
+        f"store={args.store} family={args.key} pack={pack}{extra}"
     )
 
 def cmd_scrape_all(args):
@@ -121,25 +126,6 @@ def cmd_scrape_all(args):
     if failed > 0 and args.fail_on_error:
         raise SystemExit(2)
 
-def compute_normalized_unit_price(price_cents: int, size: float, unit: str):
-    if size <= 0:
-        return None
-    eur = price_cents / 100.0
-    u = unit.lower().strip()
-
-    if u == "l":
-        return eur / size, "l"
-    if u == "ml":
-        return eur / (size / 1000.0), "l"
-    if u == "kg":
-        return eur / size, "kg"
-    if u == "g":
-        return eur / (size / 1000.0), "kg"
-    if u in {"pcs", "kos"}:
-        return eur / size, "pcs"
-
-    return None
-
 def _trend(prev_cents: int, last_cents: int):
     delta = last_cents - prev_cents
     if delta > 0:
@@ -162,13 +148,16 @@ def cmd_history(args):
         print(f"No history for family key={args.key}")
         return
 
-    # Trend per store+pack (zadnji 2 zapisa)
+    # ============================================================
+    # TREND (zadnji 2 zapisa per store+pack)
+    # ============================================================
+
     if args.trend:
         rows = conn.execute(
             """
             SELECT
               s.name AS store_name,
-              ci.label AS canonical_label,
+              COALESCE(si.label_override, ci.label) AS display_label,
               ci.size AS canonical_size,
               ci.unit AS canonical_unit,
               po.observed_on,
@@ -185,56 +174,155 @@ def cmd_history(args):
 
         latest2 = {}
         for r in rows:
-            k = (str(r["store_name"]), str(r["canonical_label"]), float(r["canonical_size"]), str(r["canonical_unit"]))
+            k = (
+                str(r["store_name"]),
+                str(r["display_label"]),
+                float(r["canonical_size"]),
+                str(r["canonical_unit"]),
+            )
             latest2.setdefault(k, [])
             if len(latest2[k]) < 2:
                 latest2[k].append((str(r["observed_on"]), int(r["price_cents"])))
 
         print(f"Trend for {args.key} (zadnji 2 opazovanji per store+pack)")
-        print("-" * 110)
+
+        hdr = (
+            f"{'store':<10}  "
+            f"{'pack':>6}  "
+            f"{'label':<35}  "
+            f"{'tr':>2}  "
+            f"{'price':>9}  "
+            f"{'Δ':>8}  "
+            f"{'%':>7}  "
+            f"{'range':<23}"
+        )
+        if args.normalized:
+            hdr += f"  {'€/unit':>12}"
+
+        print(hdr)
+        print("-" * len(hdr))
+
         for (store, label, size, unit), pts in latest2.items():
+            pack = f"{size:g}{unit}"
+            label_col = (label[:35] + "…") if len(label) > 36 else label
+
+            # samo en zapis (ni dovolj za trend)
             if len(pts) < 2:
                 d1, p1 = pts[0]
-                line = f"{store:<10} {size:g}{unit:<3} {label:<45}  n/a  last={p1/100:>7.2f} €  [{d1}]"
+                eur = p1 / 100.0
+
+                line = (
+                    f"{store:<10}  "
+                    f"{pack:>6}  "
+                    f"{label_col:<35}  "
+                    f"{'n/a':>2}  "
+                    f"{eur:>8.2f} €  "
+                    f"{'':>8}  "
+                    f"{'':>7}  "
+                    f"[{d1}]".ljust(23)
+                )
+
                 if args.normalized:
                     norm = compute_normalized_unit_price(p1, size, unit)
                     if norm:
                         nv, nu = norm
-                        line += f"  ({nv:.2f} €/{nu})"
+                        line += f"  {f'{nv:>8.2f} €/{nu}':>12}"
+                    else:
+                        line += f"  {'':>12}"
+
                 print(line)
                 continue
 
             (d1, p1), (d2, p2) = pts[0], pts[1]
+
             arrow, delta, pct = _trend(p2, p1)
+
+            eur = p1 / 100.0
+            delta_eur = delta / 100.0
+            pct_str = f"{pct:+.1f}%"
+            range_str = f"[{d2}→{d1}]"
+
             line = (
-                f"{store:<10} {size:g}{unit:<3} {label:<45}  "
-                f"{arrow} {p1/100:>7.2f} €  {delta/100:+.2f} €  ({pct:+.1f}%)  [{d2}→{d1}]"
+                f"{store:<10}  "
+                f"{pack:>6}  "
+                f"{label_col:<35}  "
+                f"{arrow:>2}  "
+                f"{eur:>8.2f} €  "
+                f"{delta_eur:>+7.2f} €  "
+                f"{pct_str:>7}  "
+                f"{range_str:<23}"
             )
+
             if args.normalized:
                 norm = compute_normalized_unit_price(p1, size, unit)
                 if norm:
                     nv, nu = norm
-                    line += f"  ({nv:.2f} €/{nu})"
+                    line += f"  {f'{nv:>8.2f} €/{nu}':>12}"
+                else:
+                    line += f"  {'':>12}"
+
             print(line)
-        print("-" * 110)
+
+        print("-" * len(hdr))
+        print()
+
+    # ============================================================
+    # FULL HISTORY
+    # ============================================================
 
     print(f"History for {args.key} (rows={len(points)})")
-    print("-" * 110)
+
+    hdr = (
+        f"{'date':<10}  "
+        f"{'store':<10}  "
+        f"{'pack':>6}  "
+        f"{'price':>9}"
+    )
+
+    if args.normalized:
+        hdr += f"  {'€/unit':>12}"
+
+    hdr += "  label"
+
+    print(hdr)
+    print("-" * len(hdr))
 
     for p in points:
         eur = p.price_cents / 100.0
-        line = (
-            f"{p.observed_on}  {p.store_name:<10}  "
-            f"{p.canonical_size:g}{p.canonical_unit:<3}  {eur:>7.2f} €  {p.canonical_label}"
+        pack = f"{p.canonical_size:g}{p.canonical_unit}"
+        label_col = (
+            p.canonical_label[:35] + "…"
+            if len(p.canonical_label) > 36
+            else p.canonical_label
         )
+
+        line = (
+            f"{p.observed_on:<10}  "
+            f"{p.store_name:<10}  "
+            f"{pack:>6}  "
+            f"{eur:>8.2f} €"
+        )
+
         if args.normalized:
-            norm = compute_normalized_unit_price(p.price_cents, p.canonical_size, p.canonical_unit)
+            norm = compute_normalized_unit_price(
+                p.price_cents,
+                p.canonical_size,
+                p.canonical_unit,
+            )
             if norm:
                 nv, nu = norm
-                line += f"  ({nv:.2f} €/{nu})"
+                line += f"  {f'{nv:>8.2f} €/{nu}':>12}"
+            else:
+                line += f"  {'':>12}"
+
+        line += f"  {label_col}"
+
         if args.show_title and p.title_raw:
             line += f"  |  {p.title_raw.strip()}"
+
         print(line)
+
+    print("-" * len(hdr))
 
 def cmd_cheapest(args):
     conn = connect(args.db)
@@ -245,7 +333,7 @@ def cmd_cheapest(args):
         SELECT
           s.name AS store_name,
           si.url AS url,
-          ci.label AS canonical_label,
+          COALESCE(si.label_override, ci.label) AS canonical_label,
           ci.size AS canonical_size,
           ci.unit AS canonical_unit,
           po.observed_on AS observed_on,
@@ -339,35 +427,62 @@ def cmd_cheapest(args):
         print("-" * 110)
         print("Missing (tracked but no observations yet):", ", ".join(sorted(set(missing))))
 
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, text=True, capture_output=True)
+
+
 def cmd_sync(args):
-    # 1) git pull
     if not os.path.isdir(".git"):
         print("Not a git repo (missing .git). Sync works only inside a git repository.")
         return
 
-    pull_cmd = ["git", "pull", "--ff-only"]
-    print("$ " + " ".join(pull_cmd))
-    res = subprocess.run(pull_cmd, text=True, capture_output=True)
+    def do_pull() -> subprocess.CompletedProcess:
+        pull_cmd = ["git", "pull", "--ff-only"]
+        print("$ " + " ".join(pull_cmd))
+        return _run(pull_cmd)
+
+    res = do_pull()
 
     if res.returncode != 0:
-        # show useful error
-        if res.stdout.strip():
-            print(res.stdout.strip())
-        if res.stderr.strip():
-            print(res.stderr.strip())
-        raise SystemExit(res.returncode)
+        combined = (res.stdout or "") + "\n" + (res.stderr or "")
+        needs_db_discard = ("data/prices.sqlite" in combined) and (
+            "would be overwritten" in combined.lower() or "local changes" in combined.lower()
+        )
+
+        if args.discard_db and needs_db_discard:
+            print("Sync blocked by local DB changes. Discarding local data/prices.sqlite and retrying...")
+
+            # Unstage if staged, then restore working tree copy
+            for cmd in [
+                ["git", "restore", "--staged", "data/prices.sqlite"],
+                ["git", "restore", "data/prices.sqlite"],
+            ]:
+                r = _run(cmd)
+                # ignore errors (file might not be staged etc.)
+                if r.stdout.strip():
+                    print(r.stdout.strip())
+                if r.stderr.strip() and r.returncode != 0:
+                    # don't hard-fail here; pull retry will tell us if still broken
+                    pass
+
+            res = do_pull()
+
+        if res.returncode != 0:
+            if res.stdout.strip():
+                print(res.stdout.strip())
+            if res.stderr.strip():
+                print(res.stderr.strip())
+            raise SystemExit(res.returncode)
 
     out = (res.stdout or "").strip()
     print(out if out else "Already up to date.")
 
-    # 2) optional: show DB status (max observed_on)
-    if args.show_db:
+    if getattr(args, "show_db", False):
         conn = connect(args.db)
         init_db(conn, args.schema)
-
         row = conn.execute("SELECT MAX(observed_on) AS max_day FROM price_observation").fetchone()
         max_day = row["max_day"] if row and row["max_day"] is not None else None
-
         if max_day:
             print(f"DB latest observed_on: {max_day}")
         else:
@@ -384,7 +499,7 @@ def cmd_list_tracked(args):
           ci.family_key AS family_key,
           ci.size AS size,
           ci.unit AS unit,
-          ci.label AS label,
+          COALESCE(si.label_override, ci.label) AS display_label, 
           si.scraper AS scraper,
           si.url AS url,
           po.observed_on AS observed_on,
@@ -415,7 +530,7 @@ def cmd_list_tracked(args):
         family = r["family_key"]
         size = float(r["size"])
         unit = r["unit"]
-        label = r["label"]
+        label = r["display_label"]
         scraper = r["scraper"]
         url = r["url"]
         observed_on = r["observed_on"]
@@ -564,7 +679,7 @@ def cmd_compare_list(args):
               s.id AS store_id,
               s.name AS store_name,
               ci.family_key AS family_key,
-              ci.label AS label,
+              COALESCE(si.label_override, ci.label) AS label,
               ci.size AS size,
               ci.unit AS unit,
               si.url AS url,
@@ -796,6 +911,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_track.add_argument("--label", required=True, help='Canonical label, e.g. "Mleko 3.5% 1L"')
     p_track.add_argument("--size", required=True, type=float, help="Canonical size (number), e.g. 1")
     p_track.add_argument("--unit", required=True, help="Canonical unit, e.g. l, g, kg")
+    p_track.add_argument("--store-label", help="Optional store-specific label (e.g. brand)",)
     p_track.set_defaults(func=cmd_track_url)
 
     # scrape-all
@@ -830,6 +946,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_db_args(p_sync)
     p_sync.add_argument("--show-db", action="store_true", help="Show DB latest observed_on after pull")
     p_sync.set_defaults(func=cmd_sync)
+    p_sync.add_argument("--discard-db", action="store_true", help="If sync fails due to local DB changes, discard local data/prices.sqlite and retry pull",)
 
     # list-tracked
     p_list = sub.add_parser("list-tracked", help="List all tracked store items")
