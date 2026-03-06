@@ -151,10 +151,4 @@ python app.py compare-list \
 - SQLite DB grows over time
 - No web UI (CLI only) (for now)
 
-## Roadmap
 
-- Web UI (Streamlit or FastAPI)
-- Price drop alerts
-- Historical charts
-- Export to CSV
-- DB pruning strategy
