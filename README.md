@@ -193,46 +193,46 @@ http://localhost:8501
 
 # Project structure
 
-price-tracker-v2 
-    -github:
-        -workflows:
-            -ci.yml
-            -scrape.yml
+- price-tracker-v2 
+    - github:
+        - workflows:
+            - ci.yml
+            - scrape.yml
     - data:
-        -prices.sqlite
-    -price_tracker:
-        -repos:
-            -__init__.py
-            -canonical_repo.py
-            -observation_repo.py
-            -store_item_repo.py
-            -store_repo.py
-        -scrapers:
-            -__init__.py
-            -hofer.py
-            -mercator.py
-            -lidl.py
-            -spar.py
-            -html_utils.py
-        -services:
-            -__init__.py
-            -analytics_service.py
-        -db.py
-        -utils.py
-        -__init__.py
-    -tests:
-        -__init__.py
-        -test_scrapres.py
-    -ui:
-        -__init__.py
-        -requirements-ui.txt
-        -streamlit_app.py
-    -.gitignore
-    -app.py
-    -README.md
-    -requirements.txt
-    -schema.sql
-    -shopping_list.json
+        - prices.sqlite
+    - price_tracker:
+        - repos:
+            - __init__.py
+            - canonical_repo.py
+            - observation_repo.py
+            - store_item_repo.py
+            - store_repo.py
+        - scrapers:
+            - __init__.py
+            - hofer.py
+            - mercator.py
+            - lidl.py
+            - spar.py
+            - html_utils.py
+        - services:
+            - __init__.py
+            - analytics_service.py
+        - db.py
+        - utils.py
+        - __init__.py
+    - tests:
+        - __init__.py
+        - test_scrapres.py
+    - ui:
+        - __init__.py
+        - requirements-ui.txt
+        - streamlit_app.py
+    - .gitignore
+    - app.py
+    - README.md
+    - requirements.txt
+    - schema.sql
+    - shopping_list.json
 
 ------------------------------------------------------------------------
 
