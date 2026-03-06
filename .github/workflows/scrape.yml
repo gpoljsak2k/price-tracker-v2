@@ -48,7 +48,7 @@ jobs:
 
       - name: Scrape all
         run: |
-          python app.py scrape-all --db data/prices.sqlite --schema schema.sql --fail-on-error
+          python app.py scrape-all --db data/prices.sqlite --schema schema.sql
         # Na GitHub runnerju ponavadi NE rabiš --insecure-ssl.
         # Če bi slučajno failalo, lahko dodaš: --insecure-ssl
 

@@ -2,119 +2,108 @@ from __future__ import annotations
 
 import json
 import re
-from decimal import Decimal
-from typing import Any, Tuple
-from urllib.parse import urlparse
 
 from .html_utils import fetch_html
 
 
-# SPAR search backend (JSON)
-# Evidence: used in public scripts; response has hits with masterValues.best-price, title, url :contentReference[oaicite:1]{index=1}
-_SPAR_SEARCH_ENDPOINT = (
-    "https://search-spar.spar-ics.com/fact-finder/rest/v4/search/products_lmos_si"
+_PRICE_EUR_RE = re.compile(r"(\d{1,3}(?:\.\d{3})*,\d{2})\s*€")
+_LD_JSON_RE = re.compile(
+    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.IGNORECASE | re.DOTALL,
 )
 
-_CODE_RE = re.compile(r"-(\d+)$")
+
+def _to_cents_from_eur_str(eur: str) -> int:
+    eur = eur.replace(".", "").replace(",", ".").strip()
+    return int(round(float(eur) * 100))
 
 
-def _eur_to_cents(d: Decimal) -> int:
-    cents = int((d * 100).quantize(Decimal("1")))
-    if cents < 0:
-        raise ValueError("negative price parsed")
-    return cents
-
-
-def _to_decimal_from_any(x: Any) -> Decimal:
-    if isinstance(x, (int, float)):
-        return Decimal(str(x))
-    s = str(x).strip()
-    # "1.234,56" -> "1234.56"
-    if re.match(r"^\d{1,3}(?:\.\d{3})+,\d{2}$", s):
-        s = s.replace(".", "").replace(",", ".")
-    else:
-        s = s.replace(",", ".")
-    return Decimal(s)
-
-
-def _extract_code_from_url(product_url: str) -> str | None:
-    path = urlparse(product_url).path.rstrip("/")
-    last = path.split("/")[-1]  # ...-131036
-    m = _CODE_RE.search(last)
-    return m.group(1) if m else None
-
-
-def _build_search_url(code: str) -> str:
-    # common params seen in the wild: query, q, page, hitsPerPage, substringFilter=pos-visible:81701 :contentReference[oaicite:2]{index=2}
-    return (
-        f"{_SPAR_SEARCH_ENDPOINT}"
-        f"?query={code}"
-        f"&q={code}"
-        f"&page=1"
-        f"&hitsPerPage=10"
-        f"&substringFilter=pos-visible%3A81701"
+def _extract_title_from_html(html: str) -> str:
+    m = re.search(
+        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+        html,
+        re.IGNORECASE,
     )
+    if not m:
+        m = re.search(
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']',
+            html,
+            re.IGNORECASE,
+        )
+    if m:
+        return m.group(1).strip()
+
+    m = re.search(r"<title>\s*(.*?)\s*</title>", html, re.IGNORECASE | re.DOTALL)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+
+    return "(unknown title)"
 
 
-def _fetch_via_search_api(product_url: str, *, verify_ssl: bool) -> Tuple[int, str]:
-    code = _extract_code_from_url(product_url)
-    if not code:
-        raise ValueError("Ne znam izluščiti product code iz SPAR URL-ja (pričakujem ...-<digits>).")
+def _try_parse_price_from_ldjson(html: str) -> tuple[int, str] | None:
+    scripts = _LD_JSON_RE.findall(html)
+    if not scripts:
+        return None
 
-    search_url = _build_search_url(code)
-
-    # reuse fetch_html (headers + optional insecure ssl)
-    raw = fetch_html(search_url, verify_ssl=verify_ssl)
-    data = json.loads(raw)
-
-    hits = data.get("hits") or []
-    if not isinstance(hits, list) or not hits:
-        raise ValueError("SPAR search API returned no hits")
-
-    # normalize wanted url path for matching
-    wanted_path = urlparse(product_url).path.rstrip("/")
-
-    best_hit = None
-
-    # 1) exact id match
-    for h in hits:
-        if not isinstance(h, dict):
+    for raw in scripts:
+        raw = raw.strip()
+        if not raw:
             continue
-        if str(h.get("id")) == code:
-            best_hit = h
-            break
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            continue
 
-    # 2) fallback: match masterValues.url if present
-    if best_hit is None:
-        for h in hits:
-            mv = h.get("masterValues") if isinstance(h, dict) else None
-            if not isinstance(mv, dict):
+        candidates = obj if isinstance(obj, list) else [obj]
+        for it in candidates:
+            if not isinstance(it, dict):
                 continue
-            u = mv.get("url")
-            if not u:
-                continue
-            # script example prefixes with www.spar.si/online + url :contentReference[oaicite:3]{index=3}
-            # here mv["url"] is usually a path like "/p/...."
-            if str(u).rstrip("/") == wanted_path:
-                best_hit = h
-                break
 
-    if best_hit is None:
-        best_hit = hits[0]  # last resort
+            title = it.get("name") or ""
+            offers = it.get("offers")
+            offer_list = offers if isinstance(offers, list) else [offers]
 
-    mv = best_hit.get("masterValues")
-    if not isinstance(mv, dict):
-        raise ValueError("SPAR hit missing masterValues")
+            for off in offer_list:
+                if not isinstance(off, dict):
+                    continue
+                price = off.get("price")
+                currency = off.get("priceCurrency")
 
-    price = mv.get("best-price")
-    title = mv.get("title") or "(unknown title)"
-    if price is None:
-        raise ValueError("SPAR hit missing masterValues.best-price")
+                if price is None:
+                    continue
 
-    price_dec = _to_decimal_from_any(price)
-    return _eur_to_cents(price_dec), str(title)
+                try:
+                    price_f = float(str(price).replace(",", "."))
+                    price_cents = int(round(price_f * 100))
+                except Exception:
+                    continue
+
+                if currency and str(currency).upper() != "EUR":
+                    continue
+
+                return price_cents, (title.strip() or "(no title)")
+
+    return None
 
 
-def scrape(url: str, *, verify_ssl: bool = True) -> Tuple[int, str]:
-    # primary: API (much more stable than scraping JS page)
-    return _fetch_via_search_api(url, verify_ssl=verify_ssl)
+def _try_parse_price_from_html_text(html: str) -> int | None:
+    prices = _PRICE_EUR_RE.findall(html)
+    if not prices:
+        return None
+    cents = [_to_cents_from_eur_str(p) for p in prices]
+    return min(cents) if cents else None
+
+
+def scrape(url: str, timeout_s: int = 20, verify_ssl: bool = True) -> tuple[int, str]:
+    html = fetch_html(url, timeout_s=timeout_s, verify_ssl=verify_ssl)
+
+    ld = _try_parse_price_from_ldjson(html)
+    if ld:
+        return ld
+
+    title = _extract_title_from_html(html)
+    cents = _try_parse_price_from_html_text(html)
+    if cents is not None:
+        return cents, title
+
+    raise ValueError("Ne najdem cene na SPAR strani (HTML parse failed).")
