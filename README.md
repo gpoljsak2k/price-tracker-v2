@@ -109,14 +109,14 @@ Add new tracked products directly from the UI.
 
 Required fields:
 
-store\
-scraper\
-url\
-key (family)\
-food name\
-size\
-unit\
-optional store label
+--store\
+--scraper\
+--url\
+--key (family)\
+--food name\
+--size\
+--unit\
+--optional store label
 
 Example:
 
